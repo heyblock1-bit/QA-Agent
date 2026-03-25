@@ -1,0 +1,9 @@
+google-credentials.json
+.env
+__pycache__/
+.DS_Store
+.claude/
+screenshots/
+report_*.md
+report_*_en.md
+agent.log
