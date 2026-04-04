@@ -75,9 +75,17 @@ def load_config(path):
 def translate_to_english(text):
     if not text or not text.strip():
         return text
-    translator = deepl.Translator(os.getenv("DEEPL_API_KEY"))
-    result = translator.translate_text(text, target_lang="EN-US")
-    return result.text
+    # DeepL 쿼터 확인 후 소진 시 Google Translate 사용
+    try:
+        translator = deepl.Translator(os.getenv("DEEPL_API_KEY"))
+        usage = translator.get_usage()
+        if usage.character.count >= usage.character.limit:
+            raise Exception("DeepL 쿼터 소진")
+        result = translator.translate_text(text, target_lang="EN-US")
+        return result.text
+    except Exception:
+        from deep_translator import GoogleTranslator
+        return GoogleTranslator(source='auto', target='en').translate(text)
 
 
 # ─── Jira 이메일 → accountId 변환 캐시 ──────────────────────────────────────
@@ -127,6 +135,7 @@ def attach_screenshots(ticket_key, platform):
         return
     token = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_TOKEN}".encode()).decode()
     headers = {"Authorization": f"Basic {token}", "X-Atlassian-Token": "no-check"}
+    all_success = True
     for filename in images:
         filepath = os.path.join(folder, filename)
         with open(filepath, "rb") as f:
@@ -138,9 +147,13 @@ def attach_screenshots(ticket_key, platform):
             )
         if r.status_code == 200:
             print(f"  📎 첨부 완료: {ticket_key} ← {filename}")
-            os.remove(filepath)
         else:
             print(f"  ❌ 첨부 실패 ({r.status_code}): {filename}")
+            all_success = False
+    if all_success:
+        new_folder = folder + "(첨부됨)"
+        os.rename(folder, new_folder)
+        print(f"  📁 폴더 이름 변경: {ticket_key} → {ticket_key}(첨부됨)")
 
 def write_ticket_id(sheet, row_index, col_index, ticket_id):
     # row_index: 0-based → gspread는 1-based이므로 +2 (헤더 row 포함)
@@ -180,7 +193,7 @@ def get_ticket_fields(ticket_key):
         return r.json()["fields"]
     return None
 
-def update_jira_ticket(ticket_key, config, row, platform, actual_result=""):
+def update_jira_ticket(ticket_key, config, row, platform, actual_result="", eng_row=None):
     title = row[COL_TITLE]
     precondition = row[COL_PRECONDITION]
     procedure = row[COL_PROCEDURE]
@@ -214,18 +227,34 @@ def update_jira_ticket(ticket_key, config, row, platform, actual_result=""):
             steps_lines.append(f"* test account : ")
 
     if platform == "iOS":
-        print("  🌐 iOS 티켓 번역 중...")
-        precondition_text = translate_to_english(precondition)
-        procedure_text = translate_to_english(procedure)
-        actual_result = translate_to_english(actual_result)
-        expected = translate_to_english(expected)
+        if eng_row is not None:
+            print("  📋 ENG 시트에서 iOS 컨텐츠 사용 중...")
+            precondition_text = eng_row[COL_PRECONDITION] if len(eng_row) > COL_PRECONDITION else precondition
+            procedure_text = eng_row[COL_PROCEDURE] if len(eng_row) > COL_PROCEDURE else procedure
+            expected = eng_row[COL_EXPECTED] if len(eng_row) > COL_EXPECTED else expected
+            eng_title = eng_row[COL_TITLE] if len(eng_row) > COL_TITLE else title
+            clean_title = re.sub(r'^(\[.*?\]\s*)+', '', eng_title).strip()
+        else:
+            print("  🌐 iOS 티켓 번역 중...")
+            try:
+                precondition_text = translate_to_english(precondition)
+                procedure_text = translate_to_english(procedure)
+                actual_result = translate_to_english(actual_result)
+                expected = translate_to_english(expected)
+            except Exception as e:
+                print(f"  ⚠️ 번역 실패, 한국어로 업데이트: {e}")
+                precondition_text = precondition
+                procedure_text = procedure
+            clean_title = re.sub(r'^(\[.*?\]\s*)+', '', title).strip()
+            try:
+                clean_title = translate_to_english(clean_title)
+            except Exception:
+                pass
     else:
         precondition_text = precondition
         procedure_text = procedure
+        clean_title = re.sub(r'^(\[.*?\]\s*)+', '', title).strip()
 
-    clean_title = re.sub(r'^(\[.*?\]\s*)+', '', title).strip()
-    if platform == "iOS":
-        clean_title = translate_to_english(clean_title)
     summary = f"[{sprint.upper()}][{platform_label}][{squad_name}][{feature_name}] {clean_title}"
 
     if precondition_text:
@@ -276,7 +305,7 @@ def get_jira_headers():
     token = base64.b64encode(f"{JIRA_EMAIL}:{JIRA_TOKEN}".encode()).decode()
     return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
-def create_jira_ticket(config, row, platform, actual_result=""):
+def create_jira_ticket(config, row, platform, actual_result="", eng_row=None):
     title = row[COL_TITLE]
     precondition = row[COL_PRECONDITION]
     procedure = row[COL_PROCEDURE]
@@ -321,9 +350,6 @@ def create_jira_ticket(config, row, platform, actual_result=""):
     squad_name = config.get("squad_name", "")
     feature_name = config.get("feature_name", "")
     clean_title = re.sub(r'^(\[.*?\]\s*)+', '', title).strip()
-    if platform == "iOS":
-        clean_title = translate_to_english(clean_title)
-    summary = f"[{sprint.upper()}][{platform_label}][{squad_name}][{feature_name}] {clean_title}"
 
     # Steps to Produce 템플릿 구성
     squad_env = config.get("squad_env", "")
@@ -341,16 +367,34 @@ def create_jira_ticket(config, row, platform, actual_result=""):
         else:
             steps_lines.append(f"* test account : ")
 
-    # iOS는 영어로 번역
+    # iOS 컨텐츠: ENG 시트 우선, 없으면 DeepL 번역
+    translation_failed = False
     if platform == "iOS":
-        print("  🌐 iOS 티켓 번역 중...")
-        precondition_text = translate_to_english(precondition)
-        procedure_text = translate_to_english(procedure)
-        actual_result = translate_to_english(actual_result)
-        expected = translate_to_english(expected)
+        if eng_row is not None:
+            print("  📋 ENG 시트에서 iOS 컨텐츠 사용 중...")
+            precondition_text = eng_row[COL_PRECONDITION] if len(eng_row) > COL_PRECONDITION else precondition
+            procedure_text = eng_row[COL_PROCEDURE] if len(eng_row) > COL_PROCEDURE else procedure
+            expected = eng_row[COL_EXPECTED] if len(eng_row) > COL_EXPECTED else expected
+            eng_title = eng_row[COL_TITLE] if len(eng_row) > COL_TITLE else title
+            clean_title = re.sub(r'^(\[.*?\]\s*)+', '', eng_title).strip()
+        else:
+            print("  🌐 iOS 티켓 번역 중...")
+            try:
+                precondition_text = translate_to_english(precondition)
+                procedure_text = translate_to_english(procedure)
+                actual_result = translate_to_english(actual_result)
+                expected = translate_to_english(expected)
+                clean_title = translate_to_english(clean_title)
+            except Exception as e:
+                print(f"  ⚠️ 번역 실패, 한국어로 생성: {e}")
+                translation_failed = True
+                precondition_text = precondition
+                procedure_text = procedure
     else:
         precondition_text = precondition
         procedure_text = procedure
+
+    summary = f"[{sprint.upper()}][{platform_label}][{squad_name}][{feature_name}] {clean_title}"
 
     if precondition_text:
         steps_lines.append(f"* precondition : {precondition_text}")
@@ -405,14 +449,14 @@ def create_jira_ticket(config, row, platform, actual_result=""):
             json={"body": "/qa-auto-gen"},
             verify=False
         )
-        return ticket_key
+        return ticket_key, translation_failed
     else:
         print(f"  ❌ 티켓 생성 실패 ({r.status_code}): {r.text[:200]}")
-        return None
+        return None, False
 
 # ─── 메인 polling 루프 ───────────────────────────────────────────────────────
 
-def process_sheet(sheet, config):
+def process_sheet(sheet, config, eng_rows=None):
     rows = sheet.get_all_values()
     headers = rows[0]
 
@@ -429,6 +473,13 @@ def process_sheet(sheet, config):
         while len(row) <= COL_BE_TICKET:
             row.append("")
 
+        # ENG 시트의 동일 행 (헤더 포함 index i+1)
+        eng_row = None
+        if eng_rows is not None and i + 1 < len(eng_rows):
+            eng_row = list(eng_rows[i + 1])
+            while len(eng_row) <= COL_EXPECTED:
+                eng_row.append("")
+
         checks = [
             (COL_IOS, COL_IOS_ACTUAL, COL_IOS_TICKET, "iOS"),
             (COL_AOS, COL_AOS_ACTUAL, COL_AOS_TICKET, "Android"),
@@ -441,9 +492,9 @@ def process_sheet(sheet, config):
         be_ticket_cell = row[COL_BE_TICKET].strip()
 
         if all_fail and be_actual and not be_ticket_cell:
-            ticket_key = create_jira_ticket(config, row, "BE", be_actual)
+            ticket_key, trans_failed = create_jira_ticket(config, row, "BE", be_actual)
             if ticket_key:
-                status = get_ticket_status(ticket_key) or "Ready"
+                status = "번역실패" if trans_failed else (get_ticket_status(ticket_key) or "Ready")
                 cell = format_ticket_cell(ticket_key, status)
                 write_ticket_id(sheet, i, COL_BE_TICKET, cell)
                 row[COL_BE_TICKET] = cell
@@ -470,11 +521,12 @@ def process_sheet(sheet, config):
             has_actual = row[actual_col].strip() != ""
             cell_value = row[ticket_col].strip()
             already_created = cell_value != ""
+            ios_eng = eng_row if platform == "iOS" else None
 
             if is_fail and has_actual and not already_created:
-                ticket_key = create_jira_ticket(config, row, platform, row[actual_col].strip())
+                ticket_key, trans_failed = create_jira_ticket(config, row, platform, row[actual_col].strip(), ios_eng)
                 if ticket_key:
-                    status = get_ticket_status(ticket_key) or "Ready"
+                    status = "번역실패" if trans_failed else (get_ticket_status(ticket_key) or "Ready")
                     cell = format_ticket_cell(ticket_key, status)
                     write_ticket_id(sheet, i, ticket_col, cell)
                     row[ticket_col] = cell
@@ -484,7 +536,7 @@ def process_sheet(sheet, config):
             elif already_created:
                 ticket_key = cell_value.split(" ")[0]
                 attach_screenshots(ticket_key, platform)
-                update_jira_ticket(ticket_key, config, row, platform, row[actual_col].strip())
+                update_jira_ticket(ticket_key, config, row, platform, row[actual_col].strip(), ios_eng)
                 # 시트에 Pass 입력 시 Jira 티켓 Closed 전환
                 is_pass = row[fail_col].strip().lower() == "pass"
                 status = get_ticket_status(ticket_key)
@@ -510,10 +562,21 @@ def poll():
             config = load_config(CONFIG_FILE)
             config.setdefault("year", "2026")
 
+            # ENG 시트 rows 로드 (KOR 시트의 iOS 티켓용)
+            eng_rows = None
+            if len(sheets) >= 2:
+                eng_rows = sheets[0].get_all_values()
+
             total_new = 0
-            for sheet in sheets:
+            for idx, sheet in enumerate(sheets):
                 print(f"  📋 [{sheet.title}] 체크 중...")
-                total_new += process_sheet(sheet, config)
+                if idx == 0:
+                    # ENG 시트: 이미 영어라 자기 자신을 eng_rows로 전달 (번역 불필요)
+                    sheet_eng_rows = eng_rows if eng_rows is not None else sheet.get_all_values()
+                else:
+                    # KOR 시트: ENG 시트 rows 전달
+                    sheet_eng_rows = eng_rows
+                total_new += process_sheet(sheet, config, sheet_eng_rows)
 
             if total_new == 0:
                 print(f"✓ 체크 완료 (다음 체크: 5분 후)")

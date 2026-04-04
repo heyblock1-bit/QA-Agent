@@ -7,7 +7,7 @@ sprint은 KST 기준 현재 주차로 자동 계산됩니다.
 ## Jira 필드
 
 server_env: Luke                        # Server Env        (customfield_10221)
-release_version: 3.13.1                 # Release Version   (customfield_10219)
+release_version: 3.15.1                 # Release Version   (customfield_10219)
 bug_type: New Feature                   # Issue Category    (customfield_10236)
 reproducibility: Always                 # Issue Frequency   (customfield_10205)
 test_type: Feature                      # Test Type         (customfield_10238)
@@ -17,7 +17,7 @@ test_type: Feature                      # Test Type         (customfield_10238)
 ## 티켓 설정
 
 squad_name: CoreUX                      # 티켓 제목 prefix [squad_name]
-feature_name: TP/SL Revamp Phase 2      # 티켓 제목 prefix [feature_name]
+feature_name: TP/SL Revamp Phase 3      # 티켓 제목 prefix [feature_name]
 squad_env: squad-tpsl                   # Steps to Produce > env 값
 
 ---
@@ -40,21 +40,21 @@ assignee_be:  63a564ca6ad11358a0977c8c
 
 ## Epic (Parent Issue)
 
-epic_ios: QA-19844
-epic_aos: QA-19845
-epic_web: QA-19846
-epic_be:  QA-19847
+epic_ios: QA-19945
+epic_aos: QA-19946
+epic_web: QA-19947
+epic_be:  QA-19948
 
 ---
 
 ## Device Info
 
 # Android
-aos_version: 3.13.101.tpsl-phase2
-device_model_aos: Galaxy S25
-os_version_aos: 16
+aos_version: 3.14.103.tpsl-phase3
+device_model_aos: Galaxy S24
+os_version_aos: 15
 
 # iOS
-ios_version: 3.12.100 (9168)
+ios_version: 3.14.100 (9219)
 device_model_ios: iPhone 16
 os_version_ios: 26
